@@ -1,5 +1,3 @@
-// --- ORBITAL Section
-
 import * as THREE from 'https://unpkg.com/three@0.163.0/build/three.module.js'; 
 import { MathUtils } from 'https://unpkg.com/three@0.163.0/src/math/MathUtils.js';
 import { ImprovedNoise } from 'https://unpkg.com/three@0.163.0/examples/jsm/math/ImprovedNoise.js';
@@ -185,11 +183,16 @@ function init() {
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
-    initXR();
+    // initXR();
     container.appendChild( renderer.domElement );
 	container.appendChild(XRButton.createButton(renderer));
 	dolly = new THREE.Object3D();
 	setUpVRControls();
+
+    // after you create dolly and before setAnimationLoop
+    renderer.xr.addEventListener('sessionstart', () => { dolly.add(camera); });
+    renderer.xr.addEventListener('sessionend',   () => { scene.add(camera); });
+
 
 
      // Add explicit size check
@@ -442,8 +445,6 @@ function init() {
             scatterTime: (scatterTimeMean + (perlin.noise(i * 100, i * 200, performance.now() * 0.001) - 0.5)*0.3)});
     }
 
-    
-
 }
 
 function update() {
@@ -639,12 +640,12 @@ function setUpVRControls() {
 }
 
 // Handle controller input
-async function initXR(frame) {
-    const xrSession = await navigator.xr.requestSession('immersive-vr');
+// async function initXR(frame) {
+//     const xrSession = await navigator.xr.requestSession('immersive-vr');
 
-    const inputSource = xrSession.inputSources[0];
-	controllerGrip1 = xrSession.requestReferenceSpace('local');
-}
+//     const inputSource = xrSession.inputSources[0];
+// 	controllerGrip1 = xrSession.requestReferenceSpace('local');
+// }
 
 function updateCamera() {
     if (!renderer.xr.isPresenting) return;
