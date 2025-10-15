@@ -15,6 +15,12 @@ import * as Recombination from "./recombinationUtil.js";
 import * as SphereUtil from "./sphere.js";
 
 const hdrFile = "./assets/black.hdr";
+
+// Detect Apple Vision Pro (visionOS)
+const IS_AVP = /\b(visionos|applevisionpro)\b/i.test(navigator.userAgent);
+
+
+
 //scene set up variables and window variables
 
 var container, camera, renderer;
@@ -184,14 +190,38 @@ function init() {
     renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
     // initXR();
-    container.appendChild( renderer.domElement );
-	container.appendChild(XRButton.createButton(renderer));
+   container.appendChild(renderer.domElement);
+    const xrBtn = XRButton.createButton(renderer, {
+    sessionMode: IS_AVP ? 'immersive-ar' : 'immersive-vr',
+    requiredFeatures: ['local-floor'],
+    optionalFeatures: ['hand-tracking','anchors','hit-test','dom-overlay']
+    });
+    container.appendChild(xrBtn);
 	dolly = new THREE.Object3D();
 	setUpVRControls();
 
     // after you create dolly and before setAnimationLoop
-    renderer.xr.addEventListener('sessionstart', () => { dolly.add(camera); });
-    renderer.xr.addEventListener('sessionend',   () => { scene.add(camera); });
+    renderer.xr.addEventListener('sessionstart', () => {
+       // if device is not Apple Vision Pro add dolly
+        if (!IS_AVP) {
+            dolly.add(camera);             // Quest etc.
+            orbit.enabled = false;
+        } else {
+            // AVP: keep orbit driving the view, don’t reparent to dolly
+            orbit.enabled = true;
+            orbit.update();
+        }
+    });
+
+    renderer.xr.addEventListener('sessionend', () => {
+        // if device is not Apple Vision Pro
+        if (!IS_AVP) {
+            scene.add(camera);
+        }
+        // Back to normal desktop behavior
+        orbit.enabled = true;
+        orbit.update();
+    });
 
 
 
@@ -649,6 +679,13 @@ function setUpVRControls() {
 
 function updateCamera() {
     if (!renderer.xr.isPresenting) return;
+
+    // AVP: keep orbit; no thumbstick locomotion/snap turns
+    if (IS_AVP) {
+        // Let OrbitControls run; ensure it keeps smoothing each frame
+        orbit.update();
+        return;
+    }
 
     const leftThumbstick = controllerStates.leftController.thumbstick;
     const rightThumbstick = controllerStates.rightController.thumbstick;
@@ -1145,5 +1182,5 @@ orbit.target.set(0, 0, 0);
 orbit.update();
 
 // Re-enable orbit after XR ends, disable on start (optional, but tidy)
-renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
-renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  orbit.update(); });
+// renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
+// renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  orbit.update(); });
