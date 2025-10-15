@@ -17,16 +17,23 @@ import * as SphereUtil from "./sphere.js";
 const hdrFile = "./assets/black.hdr";
 
 // Detect Apple Vision Pro (visionOS)
-const IS_AVP = /\b(visionos|applevisionpro)\b/i.test(navigator.userAgent);
+const IS_AVP = /\b(visionos|apple ?vision ?pro)\b/i.test(navigator.userAgent);
 
-// Gesture state for AVP hand-tracking
-const AVPGesture = {
-  left:  { pinching: false, lastTip: new THREE.Vector3(), hasLast: false },
-  right: { pinching: false, lastTip: new THREE.Vector3(), hasLast: false },
-  twoPinchLastDist: null
+// ---- AVP gesture state ----
+let handL = null, handR = null;
+
+const G = {
+  // Per-hand tracking
+  left:  { pinching:false, last: new THREE.Vector3(), hasLast:false },
+  right: { pinching:false, last: new THREE.Vector3(), hasLast:false },
+  // Two-hand zoom
+  lastTwoDist: null
 };
 
-let handL = null, handR = null;
+// Tunables (meters -> radians/scale)
+const PINCH_THRESH = 0.040;   // 4 cm: more forgiving for AVP
+const ROTATE_SENS  = 3.0;     // orbit radians per meter
+const ZOOM_SENS    = 6.0;     // dolly factor per meter moved (forward/back)
 
 
 //scene set up variables and window variables
@@ -207,7 +214,7 @@ function init() {
     const xrBtn = XRButton.createButton(renderer, {
     sessionMode: IS_AVP ? 'immersive-ar' : 'immersive-vr',
     requiredFeatures: ['local-floor'],
-    optionalFeatures: ['hand-tracking','anchors','hit-test'] // keep 'hand-tracking'!
+    optionalFeatures: ['hand-tracking','hit-test','anchors']
     });
     container.appendChild(xrBtn);
 	dolly = new THREE.Object3D();
@@ -215,25 +222,31 @@ function init() {
 
     // after you create dolly and before setAnimationLoop
     renderer.xr.addEventListener('sessionstart', () => {
-       // if device is not Apple Vision Pro add dolly
-         if (!IS_AVP) {
-            dolly.add(camera);   // Quest path
-            orbit.enabled = false;
-        } else {
-            // AVP: stay on OrbitControls while in XR
+        if (IS_AVP) {
+            // Hands for joint data
+            handL = renderer.xr.getHand(0);
+            handR = renderer.xr.getHand(1);
+            scene.add(handL, handR);
+
+            // Use OrbitControls in XR (no dolly parenting)
             orbit.enabled = true;
             orbit.update();
+        } else {
+            // Quest / others
+            dolly.add(camera);
+            orbit.enabled = false;
         }
     });
 
     renderer.xr.addEventListener('sessionend', () => {
-        // if device is not Apple Vision Pro
-        if (!IS_AVP) {
-            scene.add(camera);
-        }
-        // Back to normal desktop behavior
+        if (!IS_AVP) scene.add(camera);
+
         orbit.enabled = true;
         orbit.update();
+
+        // Reset gesture state
+        G.left.hasLast = G.right.hasLast = false;
+        G.lastTwoDist = null;
     });
 
 
@@ -490,19 +503,19 @@ function init() {
 
 }
 
-function getJointPos(hand, name, out = new THREE.Vector3()) {
+function getJointPosFromThree(hand, jointName, out = new THREE.Vector3()) {
   if (!hand || !hand.joints) return null;
-  const j = hand.joints[name];
+  const j = hand.joints[jointName];
   if (!j) return null;
   return out.copy(j.position);
 }
 
-function isPinching(hand, threshold = 0.025) {
+function isPinching(hand, threshold = PINCH_THRESH) {
   if (!hand || !hand.joints) return false;
-  const a = hand.joints['index-finger-tip'];
-  const b = hand.joints['thumb-tip'];
-  if (!a || !b) return false;
-  return a.position.distanceTo(b.position) < threshold;
+  const tip  = hand.joints['index-finger-tip'];
+  const thumb= hand.joints['thumb-tip'];
+  if (!tip || !thumb) return false;
+  return tip.position.distanceTo(thumb.position) < threshold;
 }
 
 const _tmpA = new THREE.Vector3();
@@ -514,71 +527,69 @@ function handleAVPGestures() {
   if (!IS_AVP || !renderer.xr.isPresenting) return;
 
   // Update pinch states
-  AVPGesture.left.pinching  = isPinching(handL);
-  AVPGesture.right.pinching = isPinching(handR);
+  G.left.pinching  = isPinching(handL);
+  G.right.pinching = isPinching(handR);
 
-  const leftTip  = getJointPos(handL,  'index-finger-tip', _tmpA);
-  const rightTip = getJointPos(handR, 'index-finger-tip', _tmpB);
+  const leftTip  = getJointPosFromThree(handL,  'index-finger-tip', _tmpA);
+  const rightTip = getJointPosFromThree(handR, 'index-finger-tip', _tmpB);
 
-  // Two-hand pinch = zoom
-  if (AVPGesture.left.pinching && AVPGesture.right.pinching && leftTip && rightTip) {
+  // ---------- Two-hand pinch = zoom ----------
+  if (G.left.pinching && G.right.pinching && leftTip && rightTip) {
     const dist = leftTip.distanceTo(rightTip);
-    if (AVPGesture.twoPinchLastDist != null) {
-      const d = dist - AVPGesture.twoPinchLastDist; // >0 fingers apart, <0 together
-      // Map meters->zoom scale; small, smooth steps
-      const ZOOM_SENS = 3.0; // tune
-      const amt = THREE.MathUtils.clamp(d * ZOOM_SENS, -0.2, 0.2);
-
-      if (amt > 0) {
-        // fingers move apart => zoom in
-        orbit.dollyIn(1 + Math.abs(amt));
-      } else if (amt < 0) {
-        // fingers together => zoom out
-        orbit.dollyOut(1 + Math.abs(amt));
-      }
+    if (G.lastTwoDist != null) {
+      const d = dist - G.lastTwoDist; // >0 apart => zoom in
+      const amt = THREE.MathUtils.clamp(d * ZOOM_SENS, -0.25, 0.25);
+      if (amt > 0) orbit.dollyIn(1 + Math.abs(amt));
+      else         orbit.dollyOut(1 + Math.abs(amt));
       orbit.update();
     }
-    AVPGesture.twoPinchLastDist = dist;
-
-    // Reset single-hand "lastTip" so rotate doesn't jump when releasing one hand
-    AVPGesture.left.hasLast = false;
-    AVPGesture.right.hasLast = false;
-    return; // don’t also rotate when two-pinch is active
+    G.lastTwoDist = dist;
+    // prevent single-hand logic this frame
+    G.left.hasLast = G.right.hasLast = false;
+    return;
   } else {
-    AVPGesture.twoPinchLastDist = null;
+    G.lastTwoDist = null;
   }
 
-  // One-hand pinch + drag = rotate
-  const ROTATE_SENS = 2.5; // radians per meter-ish; tune to taste
+  // ---------- One-hand pinch: rotate + push/pull zoom ----------
+  // Prefer the hand that is pinching
+  const active = (G.right.pinching && rightTip) ? { tip:rightTip, state:G.right }
+               : (G.left.pinching  && leftTip ) ? { tip:leftTip,  state:G.left  }
+               : null;
 
-  // Prefer right hand if both are pinching (but not two-pinching)
-  let active = null;
-  if (AVPGesture.right.pinching && rightTip) active = { side: 'right', tip: rightTip, state: AVPGesture.right };
-  else if (AVPGesture.left.pinching && leftTip) active = { side: 'left', tip: leftTip, state: AVPGesture.left };
+  if (!active) {
+    G.left.hasLast = G.right.hasLast = false;
+    return;
+  }
 
-  if (active) {
-    if (active.state.hasLast) {
-      // World delta -> camera-local (so left/right maps to yaw, up/down to pitch)
-      _delta.copy(active.tip).sub(active.state.lastTip);
-      _invCamQ.copy(camera.quaternion).invert();
-      _delta.applyQuaternion(_invCamQ);
+  if (active.state.hasLast) {
+    // World delta -> camera-local to decide rotate vs zoom
+    _delta.copy(active.tip).sub(active.state.last);
+    _invCamQ.copy(camera.quaternion).invert();
+    _delta.applyQuaternion(_invCamQ);
 
-      const dx = THREE.MathUtils.clamp(_delta.x, -0.1, 0.1);
-      const dy = THREE.MathUtils.clamp(_delta.y, -0.1, 0.1);
+    const dx = THREE.MathUtils.clamp(_delta.x, -0.12, 0.12);
+    const dy = THREE.MathUtils.clamp(_delta.y, -0.12, 0.12);
+    const dz = THREE.MathUtils.clamp(_delta.z, -0.12, 0.12); // forward/back relative to camera
 
-      // OrbitControls: left = yaw, up = pitch (radians)
+    // Heuristic: if forward/back dominates, treat as zoom; else rotate
+    if (Math.abs(dz) > (Math.abs(dx) + Math.abs(dy)) * 1.2) {
+      // Move hand forward (negative z in camera space) => zoom in
+      if (dz < 0) orbit.dollyIn(1 + Math.min(0.25, Math.abs(dz) * ZOOM_SENS));
+      else        orbit.dollyOut(1 + Math.min(0.25, Math.abs(dz) * ZOOM_SENS));
+    } else {
+      // Rotate like iPad orbit
       orbit.rotateLeft( -dx * ROTATE_SENS );
       orbit.rotateUp(   -dy * ROTATE_SENS );
-      orbit.update();
     }
-    active.state.lastTip.copy(active.tip);
-    active.state.hasLast = true;
-  } else {
-    // No active one-hand pinch: clear last positions
-    AVPGesture.left.hasLast = false;
-    AVPGesture.right.hasLast = false;
+    orbit.update();
   }
+
+  active.state.last.copy(active.tip);
+  active.state.hasLast = true;
 }
+
+
 
 
 function update() {
@@ -697,8 +708,8 @@ function update() {
         checkBounds(holeSpheres, electronSpheres, boxMin, boxMax);
 		updateCamera();
         if (IS_AVP) {
-            handleAVPGestures();
-        }
+          handleAVPGestures();
+      }
         renderer.render( scene, camera );
 		
     });
