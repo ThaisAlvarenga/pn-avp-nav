@@ -16,24 +16,32 @@ import * as SphereUtil from "./sphere.js";
 
 const hdrFile = "./assets/black.hdr";
 
-// Detect Apple Vision Pro (visionOS)
+
+// --- visionOS detection + gesture state ---
 const IS_AVP = /\b(visionos|apple ?vision ?pro)\b/i.test(navigator.userAgent);
 
-// ---- AVP gesture state ----
-let handL = null, handR = null;
+// Global refs used across patches
+let XR_ORBIT_PIVOT;                 // the group we rotate/translate
+const ORBIT_TARGET = new THREE.Vector3(0, 0, 0);
 
+let handL = null, handR = null;     // AVP hand objects
+
+// Simple gesture state & temps
 const G = {
-  // Per-hand tracking
-  left:  { pinching:false, last: new THREE.Vector3(), hasLast:false },
-  right: { pinching:false, last: new THREE.Vector3(), hasLast:false },
-  // Two-hand zoom
+  left:  { pinching:false, last:new THREE.Vector3(), hasLast:false },
+  right: { pinching:false, last:new THREE.Vector3(), hasLast:false },
   lastTwoDist: null
 };
 
-// Tunables (meters -> radians/scale)
-const PINCH_THRESH = 0.040;   // 4 cm: more forgiving for AVP
-const ROTATE_SENS  = 3.0;     // orbit radians per meter
-const ZOOM_SENS    = 6.0;     // dolly factor per meter moved (forward/back)
+const PINCH_THRESH = 0.040; // 4cm forgiving pinch
+const ROTATE_SENS = 3.0;    // radians per meter of hand move
+const ZOOM_SENS   = 0.8;    // meters of pivot dolly per meter
+
+// temps
+const _tmpA = new THREE.Vector3();
+const _tmpB = new THREE.Vector3();
+const _delta = new THREE.Vector3();
+const _invCamQ = new THREE.Quaternion();
 
 
 //scene set up variables and window variables
@@ -203,51 +211,48 @@ function init() {
 
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.xr.enabled = true;
-    if (IS_AVP) {
-        handL = renderer.xr.getHand(0);
-        handR = renderer.xr.getHand(1);
-        scene.add(handL, handR);
-    }
     renderer.xr.setReferenceSpaceType('local-floor');
     // initXR();
-   container.appendChild(renderer.domElement);
+    container.appendChild(renderer.domElement);
+
     const xrBtn = XRButton.createButton(renderer, {
     sessionMode: IS_AVP ? 'immersive-ar' : 'immersive-vr',
     requiredFeatures: ['local-floor'],
     optionalFeatures: ['hand-tracking','hit-test','anchors']
     });
     container.appendChild(xrBtn);
-	dolly = new THREE.Object3D();
-	setUpVRControls();
+
+    dolly = new THREE.Object3D();
+    setUpVRControls();
 
     // after you create dolly and before setAnimationLoop
     renderer.xr.addEventListener('sessionstart', () => {
-        if (IS_AVP) {
-            // Hands for joint data
-            handL = renderer.xr.getHand(0);
-            handR = renderer.xr.getHand(1);
-            scene.add(handL, handR);
+  if (IS_AVP) {
+    // AVP: hands for gestures; keep them in root scene (not in pivot)
+    handL = renderer.xr.getHand(0); handL.userData.keepInScene = true;
+    handR = renderer.xr.getHand(1); handR.userData.keepInScene = true;
+    scene.add(handL, handR);
 
-            // Use OrbitControls in XR (no dolly parenting)
-            orbit.enabled = true;
-            orbit.update();
-        } else {
-            // Quest / others
-            dolly.add(camera);
-            orbit.enabled = false;
-        }
-    });
+    // We will move XR_ORBIT_PIVOT (content), not the camera/dolly
+    // (optional) disable desktop OrbitControls inside XR
+    orbit.enabled = false;
 
-    renderer.xr.addEventListener('sessionend', () => {
-        if (!IS_AVP) scene.add(camera);
+  } else {
+    // Quest path: camera rides the dolly
+    dolly.add(camera);
+    orbit.enabled = false;
+  }
+});
 
-        orbit.enabled = true;
-        orbit.update();
+renderer.xr.addEventListener('sessionend', () => {
+  if (!IS_AVP) scene.add(camera);
+  // reset gesture state
+  G.left.hasLast = G.right.hasLast = false;
+  G.lastTwoDist = null;
+  orbit.enabled = true;
+  orbit.update();
+});
 
-        // Reset gesture state
-        G.left.hasLast = G.right.hasLast = false;
-        G.lastTwoDist = null;
-    });
 
 
 
@@ -268,6 +273,31 @@ function init() {
     const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
     directionalLight.position.set(1, 1, 1).normalize();
     scene.add(directionalLight);
+
+    // ---- XR orbit pivot (we rotate/translate this in XR) ----
+XR_ORBIT_PIVOT = new THREE.Group();
+XR_ORBIT_PIVOT.name = 'XR_ORBIT_PIVOT';
+scene.add(XR_ORBIT_PIVOT);
+
+// Move everything currently in the scene (except camera) into the pivot:
+(function scoopIntoPivot() {
+  const survivors = new Set([camera]);
+  const children = scene.children.slice();
+  for (const c of children) {
+    if (!survivors.has(c)) XR_ORBIT_PIVOT.add(c);
+  }
+})();
+
+// Route all future scene.add() calls into the pivot automatically,
+// EXCEPT the camera and any object you mark with userData.keepInScene = true
+const _sceneAdd = scene.add.bind(scene);
+scene.add = function(...objs) {
+  for (const o of objs) {
+    if (o === camera || o?.userData?.keepInScene === true) _sceneAdd(o);
+    else XR_ORBIT_PIVOT.add(o);
+  }
+};
+
 
     // GUI
     gui = new dat.GUI({autoPlace: false});
@@ -503,93 +533,92 @@ function init() {
 
 }
 
-function getJointPosFromThree(hand, jointName, out = new THREE.Vector3()) {
+function pivotRotateAroundTarget(dYaw, dPitch) {
+  // keep pivot centered on your logical orbit target
+  XR_ORBIT_PIVOT.position.copy(ORBIT_TARGET);
+
+  // yaw around world up
+  XR_ORBIT_PIVOT.rotateOnWorldAxis(new THREE.Vector3(0,1,0), dYaw);
+
+  // pitch around camera-right so it feels natural
+  const camRight = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+  XR_ORBIT_PIVOT.rotateOnWorldAxis(camRight, dPitch);
+}
+
+function pivotDollyAlongView(deltaMeters) {
+  // move content toward/away from the headset
+  const viewDir = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  XR_ORBIT_PIVOT.position.addScaledVector(viewDir, deltaMeters);
+}
+
+function getJointPos(hand, name, out = new THREE.Vector3()) {
   if (!hand || !hand.joints) return null;
-  const j = hand.joints[jointName];
+  const j = hand.joints[name];
   if (!j) return null;
   return out.copy(j.position);
 }
 
 function isPinching(hand, threshold = PINCH_THRESH) {
   if (!hand || !hand.joints) return false;
-  const tip  = hand.joints['index-finger-tip'];
-  const thumb= hand.joints['thumb-tip'];
-  if (!tip || !thumb) return false;
-  return tip.position.distanceTo(thumb.position) < threshold;
+  const a = hand.joints['index-finger-tip'];
+  const b = hand.joints['thumb-tip'];
+  if (!a || !b) return false;
+  return a.position.distanceTo(b.position) < threshold;
 }
-
-const _tmpA = new THREE.Vector3();
-const _tmpB = new THREE.Vector3();
-const _delta = new THREE.Vector3();
-const _invCamQ = new THREE.Quaternion();
 
 function handleAVPGestures() {
   if (!IS_AVP || !renderer.xr.isPresenting) return;
 
-  // Update pinch states
-  G.left.pinching  = isPinching(handL);
-  G.right.pinching = isPinching(handR);
+  const leftPinch  = isPinching(handL);
+  const rightPinch = isPinching(handR);
 
-  const leftTip  = getJointPosFromThree(handL,  'index-finger-tip', _tmpA);
-  const rightTip = getJointPosFromThree(handR, 'index-finger-tip', _tmpB);
+  const leftTip  = getJointPos(handL,  'index-finger-tip', _tmpA);
+  const rightTip = getJointPos(handR, 'index-finger-tip', _tmpB);
 
-  // ---------- Two-hand pinch = zoom ----------
-  if (G.left.pinching && G.right.pinching && leftTip && rightTip) {
+  // --- Two-hand pinch = zoom (distance change moves content) ---
+  if (leftPinch && rightPinch && leftTip && rightTip) {
     const dist = leftTip.distanceTo(rightTip);
     if (G.lastTwoDist != null) {
-      const d = dist - G.lastTwoDist; // >0 apart => zoom in
-      const amt = THREE.MathUtils.clamp(d * ZOOM_SENS, -0.25, 0.25);
-      if (amt > 0) orbit.dollyIn(1 + Math.abs(amt));
-      else         orbit.dollyOut(1 + Math.abs(amt));
-      orbit.update();
+      const d = dist - G.lastTwoDist; // apart => positive
+      const meters = THREE.MathUtils.clamp(d * ZOOM_SENS, -0.25, 0.25);
+      pivotDollyAlongView(meters);
     }
     G.lastTwoDist = dist;
-    // prevent single-hand logic this frame
     G.left.hasLast = G.right.hasLast = false;
-    return;
+    return; // do not also rotate this frame
   } else {
     G.lastTwoDist = null;
   }
 
-  // ---------- One-hand pinch: rotate + push/pull zoom ----------
-  // Prefer the hand that is pinching
-  const active = (G.right.pinching && rightTip) ? { tip:rightTip, state:G.right }
-               : (G.left.pinching  && leftTip ) ? { tip:leftTip,  state:G.left  }
-               : null;
+  // --- One-hand pinch: rotate, or if forward/back dominates, dolly ---
+  let active = null;
+  if (rightPinch && rightTip) active = { tip:rightTip, state:G.right };
+  else if (leftPinch && leftTip) active = { tip:leftTip, state:G.left };
 
-  if (!active) {
-    G.left.hasLast = G.right.hasLast = false;
-    return;
-  }
+  if (!active) { G.left.hasLast = G.right.hasLast = false; return; }
 
   if (active.state.hasLast) {
-    // World delta -> camera-local to decide rotate vs zoom
     _delta.copy(active.tip).sub(active.state.last);
+    // convert world delta to camera-local
     _invCamQ.copy(camera.quaternion).invert();
     _delta.applyQuaternion(_invCamQ);
 
     const dx = THREE.MathUtils.clamp(_delta.x, -0.12, 0.12);
     const dy = THREE.MathUtils.clamp(_delta.y, -0.12, 0.12);
-    const dz = THREE.MathUtils.clamp(_delta.z, -0.12, 0.12); // forward/back relative to camera
+    const dz = THREE.MathUtils.clamp(_delta.z, -0.12, 0.12);
 
-    // Heuristic: if forward/back dominates, treat as zoom; else rotate
     if (Math.abs(dz) > (Math.abs(dx) + Math.abs(dy)) * 1.2) {
-      // Move hand forward (negative z in camera space) => zoom in
-      if (dz < 0) orbit.dollyIn(1 + Math.min(0.25, Math.abs(dz) * ZOOM_SENS));
-      else        orbit.dollyOut(1 + Math.min(0.25, Math.abs(dz) * ZOOM_SENS));
+      // push/pull = dolly content (negative z is forward => zoom in)
+      pivotDollyAlongView(-dz * ZOOM_SENS);
     } else {
-      // Rotate like iPad orbit
-      orbit.rotateLeft( -dx * ROTATE_SENS );
-      orbit.rotateUp(   -dy * ROTATE_SENS );
+      // orbit rotate around target
+      pivotRotateAroundTarget(-dx * ROTATE_SENS, -dy * ROTATE_SENS);
     }
-    orbit.update();
   }
 
   active.state.last.copy(active.tip);
   active.state.hasLast = true;
 }
-
-
 
 
 function update() {
@@ -707,10 +736,13 @@ function update() {
         updateSpherePosition();
         checkBounds(holeSpheres, electronSpheres, boxMin, boxMax);
 		updateCamera();
-        if (IS_AVP) {
-          handleAVPGestures();
-      }
-        renderer.render( scene, camera );
+
+if (IS_AVP) {
+  handleAVPGestures();    // <- process AVP gestures before drawing
+}
+
+renderer.render(scene, camera);
+
 		
     });
 }
@@ -796,14 +828,8 @@ function setUpVRControls() {
 // }
 
 function updateCamera() {
-    if (!renderer.xr.isPresenting) return;
-
-    // AVP: Orbit-only (no dolly locomotion)
-    if (IS_AVP) {
-        orbit.update(); // keep damping smooth
-        return;
-    }
-
+     if (!renderer.xr.isPresenting) return;
+     if (IS_AVP) return; 
     const leftThumbstick = controllerStates.leftController.thumbstick;
     const rightThumbstick = controllerStates.rightController.thumbstick;
 
