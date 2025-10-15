@@ -206,6 +206,20 @@ function init() {
     camera = new THREE.PerspectiveCamera( 75, container.clientWidth / container.clientHeight, 0.1, 1500);
     // camera.position.z = 150;
     camera.position.set(0, 0, 150);
+
+    // --- Visual debug panel attached to the camera (always visible) ---
+let DEBUG_PANEL;
+{
+  const geo = new THREE.PlaneGeometry(0.22, 0.08);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.85 });
+  DEBUG_PANEL = new THREE.Mesh(geo, mat);
+  DEBUG_PANEL.position.set(0, -0.18, -0.6); // a little below your view
+  DEBUG_PANEL.userData.keepInScene = true;  // keep out of pivot
+  camera.add(DEBUG_PANEL);                  // attach to camera (root scene)
+  scene.add(camera);                        // ensure camera is in the root
+}
+
+
     //renderer
     renderer = new THREE.WebGLRenderer({ alpha: false });
 
@@ -571,6 +585,20 @@ function handleAVPGestures() {
 
   const leftPinch  = isPinching(handL);
   const rightPinch = isPinching(handR);
+
+  // --- VISUAL DEBUG: color indicates pinch state ---
+// purple = two-hand pinch, green = left pinch, blue = right pinch, gray = none
+if (typeof DEBUG_PANEL !== 'undefined' && DEBUG_PANEL.material) {
+  if (leftPinch && rightPinch) {
+    DEBUG_PANEL.material.color.setHex(0x9b59b6); // purple
+  } else if (leftPinch) {
+    DEBUG_PANEL.material.color.setHex(0x2ecc71); // green
+  } else if (rightPinch) {
+    DEBUG_PANEL.material.color.setHex(0x3498db); // blue
+  } else {
+    DEBUG_PANEL.material.color.setHex(0x444444); // idle gray
+  }
+}
 
   const leftTip  = getJointPos(handL,  'index-finger-tip', _tmpA);
   const rightTip = getJointPos(handR, 'index-finger-tip', _tmpB);
