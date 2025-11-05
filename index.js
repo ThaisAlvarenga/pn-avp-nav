@@ -126,78 +126,6 @@ const vrSettings = {
 const loader = new FontLoader();
 var scene = new THREE.Scene();
 
-// DEBUGGING
-// --- HUD panel + slider (global) ---
-let DEBUG_PANEL; // the gray box attached to the camera
-
-const SLIDER = {
-  group: null,
-  track: null,
-  knob: null,
-  width: 0.18,   // meters
-  height: 0.02,  // meters
-  value: 0.5,    // 0..1 -> used to tint panel by hue
-};
-
-let XR_IS_SELECTING = false; // current select/pinch state
-
-function createHUD() {
-  // Gray panel attached to the camera, always visible
-  const panelGeo = new THREE.PlaneGeometry(0.22, 0.08);
-  const panelMat = new THREE.MeshBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.9 });
-  DEBUG_PANEL = new THREE.Mesh(panelGeo, panelMat);
-  DEBUG_PANEL.position.set(0, -0.18, -0.6); // a little below center of view
-  camera.add(DEBUG_PANEL);
-  scene.add(camera); // ensure camera is in the root scene
-
-  // Slider group (under the panel)
-  SLIDER.group = new THREE.Group();
-  SLIDER.group.position.set(0, -0.012, 0.001); // slightly in front to avoid z-fighting
-  DEBUG_PANEL.add(SLIDER.group);
-
-  // Track
-  const trackGeo = new THREE.PlaneGeometry(SLIDER.width, SLIDER.height);
-  const trackMat = new THREE.MeshBasicMaterial({ color: 0x666666, transparent: true, opacity: 0.95 });
-  SLIDER.track = new THREE.Mesh(trackGeo, trackMat);
-  SLIDER.group.add(SLIDER.track);
-
-  // Knob
-  const knobGeo = new THREE.PlaneGeometry(0.016, 0.04);
-  const knobMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  SLIDER.knob = new THREE.Mesh(knobGeo, knobMat);
-  SLIDER.group.add(SLIDER.knob);
-
-  updateSliderVisual(); // initial sync
-}
-
-function updateSliderVisual() {
-  if (!DEBUG_PANEL || !SLIDER.knob) return;
-  // position knob -width/2..+width/2
-  const x = (SLIDER.value - 0.5) * SLIDER.width;
-  SLIDER.knob.position.x = x;
-
-  // tint panel by hue for very obvious feedback
-  DEBUG_PANEL.material.color.setHSL(SLIDER.value, 0.7, XR_IS_SELECTING ? 0.65 : 0.5);
-}
-
-function nudgeSlider(step = 0.08) {
-  SLIDER.value = THREE.MathUtils.clamp(SLIDER.value + step, 0, 1);
-  updateSliderVisual();
-}
-
-// XR (AVP/Quest) select feedback
-function onXRSelectStart() {
-  XR_IS_SELECTING = true;
-  // brighten + nudge the slider each click
-  nudgeSlider(+0.08);
-}
-
-function onXRSelectEnd() {
-  XR_IS_SELECTING = false;
-  updateSliderVisual();
-}
-
-
 init();
 
 update();
@@ -256,9 +184,6 @@ function init() {
     // camera.position.z = 150;
     camera.position.set(0, 0, 150);
     
-   // for debugging
-createHUD();   
-
 
     //renderer
     renderer = new THREE.WebGLRenderer({ alpha: false });
@@ -284,10 +209,10 @@ createHUD();
        const session = renderer.xr.getSession();
 
   // XR natural input / controller select events (AVP transient pointer, Quest triggers)
-  if (session) {
-    session.addEventListener('selectstart', onXRSelectStart);
-    session.addEventListener('selectend',   onXRSelectEnd);
-  }
+//   if (session) {
+//     session.addEventListener('selectstart', onXRSelectStart);
+//     session.addEventListener('selectend',   onXRSelectEnd);
+//   }
 
   if (!IS_AVP) {
     dolly.add(camera);
@@ -300,10 +225,10 @@ createHUD();
 
     renderer.xr.addEventListener('sessionend', () => {
         const session = renderer.xr.getSession();
-  if (session) {
-    session.removeEventListener('selectstart', onXRSelectStart);
-    session.removeEventListener('selectend',   onXRSelectEnd);
-  }
+//   if (session) {
+//     session.removeEventListener('selectstart', onXRSelectStart);
+//     session.removeEventListener('selectend',   onXRSelectEnd);
+//   }
 
   if (!IS_AVP) {
     scene.add(camera);
@@ -425,13 +350,6 @@ createHUD();
         scene.add(eSignTextMesh);
         scene.add(chargeTextMesh_pos);
         scene.add(chargeTextMesh_neg);
-
-        renderer.domElement.addEventListener('pointerdown', () => {
-  onXRSelectStart();
-});
-renderer.domElement.addEventListener('pointerup', () => {
-  onXRSelectEnd();
-});
 
     
     } );
