@@ -95,7 +95,6 @@ var recombination_orbs = [];
 //generation variables
 var generatedPairs = []; //[{electron, hole}, {electron, hole}]
 
-
 //VR control variables
 var controller1, controller2;
 var controllerGrip1, controllerGrip2;
@@ -123,10 +122,72 @@ const vrSettings = {
 	rotationSpeed: 0.05
 };
 
+// XR slider in world-space variables
+// --- XR slider globals (TOP OF FILE) ---
+const SLIDER_MIN = -1.4;
+const SLIDER_MAX =  0.4;
+const TRACK_LEN_M = 0.18;
+const PINCH_THRESHOLD = 0.018;
+
+let sliderValue = 0.0;
+let xrRefSpace_local = null;
+let leftHandSource = null;
+let rightHandSource = null;
+
+const sliderRoot  = new THREE.Object3D();
+const sliderTilt  = new THREE.Object3D();
+const sliderPanel = new THREE.Object3D();
+
+let sliderKnob;         // <— promote to global
+let sliderTrack;        // <— promote to global
+let voltageCanvas, voltageCtx, voltageTexture; // <— promote
+let sliderBuilt = false; // guard so you don’t touch UI before it exists
+
+const sliderRaycaster = new THREE.Raycaster();
+const sliderTmpMat = new THREE.Matrix4();
+let isControllerDragging = false;
+let activeDraggingController = null;
+
+const valueToX = v => THREE.MathUtils.mapLinear(v, SLIDER_MIN, SLIDER_MAX, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+const xToValue = x => THREE.MathUtils.clamp(
+  THREE.MathUtils.mapLinear(x, -TRACK_LEN_M/2, TRACK_LEN_M/2, SLIDER_MIN, SLIDER_MAX),
+  SLIDER_MIN, SLIDER_MAX
+);
+
+// make drawVoltageLabel available everywhere
+function drawVoltageLabel(v) {
+  if (!voltageCanvas) return;
+  const W = voltageCanvas.width, H = voltageCanvas.height;
+  voltageCtx.clearRect(0,0,W,H);
+  voltageCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  voltageCtx.fillRect(0,0,W,H);
+  voltageCtx.fillStyle = '#fff';
+  voltageCtx.font = 'bold 120px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  voltageCtx.textAlign = 'center';
+  voltageCtx.textBaseline = 'middle';
+  voltageCtx.fillText(`Voltage: ${v.toFixed(2)} V`, W/2, H/2);
+  voltageTexture.needsUpdate = true;
+}
+
+// also make intersectSlider global because you call it outside where you created it
+function intersectSlider(ctrl) {
+  if (!sliderKnob || !sliderTrack) return null;
+  sliderTmpMat.identity().extractRotation(ctrl.matrixWorld);
+  sliderRaycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  sliderRaycaster.ray.direction.set(0,0,-1).applyMatrix4(sliderTmpMat);
+  const hits = sliderRaycaster.intersectObjects([sliderKnob, sliderTrack], false);
+  return hits.length ? hits[0] : null;
+}
+
+
+
+
+
 const loader = new FontLoader();
 var scene = new THREE.Scene();
 
 init();
+
 
 update();
 
@@ -154,7 +215,8 @@ setInterval(() => {
 }, 2000);
 
  
-function init() {
+function init() 
+{
     //camera, background textures, background, scene, initial geometry, materials, renderer
     const norm_vel = [{nv: 0.1, quantity: 3}, {nv: 0.2, quantity: 10}, {nv: 0.3, quantity: 21}, {nv: 0.4, quantity: 35}, {nv: 0.5, quantity: 49}, 
         {nv: 0.6, quantity: 63}, {nv: 0.7, quantity: 74}, {nv: 0.8, quantity: 82}, {nv: 0.9, quantity: 86}, {nv: 1.0, quantity: 86},
@@ -306,10 +368,15 @@ function init() {
 
 
     voltageControl.addEventListener('input', () => {
-        voltageLevel = parseFloat(voltageControl.value);
-        voltage = voltageLevel;
-        document.getElementById("myText").innerHTML = voltage;
-     });
+  voltage = parseFloat(voltageControl.value);
+  document.getElementById("myText").innerHTML = voltage.toFixed(2);
+
+  if (sliderBuilt) {
+    sliderValue = voltage;                   // reflect DOM change in XR slider
+    sliderKnob.position.x = valueToX(sliderValue);
+    drawVoltageLabel(sliderValue);
+  }
+});
 
  
     
@@ -498,7 +565,185 @@ function init() {
             scatterTime: (scatterTimeMean + (perlin.noise(i * 100, i * 200, performance.now() * 0.001) - 0.5)*0.3)});
     }
 
+    // === Build slider UI ===
+scene.add(sliderRoot);
+sliderRoot.add(sliderTilt);
+sliderTilt.add(sliderPanel);
+
+// Backing panel
+const sliderBg = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.22, 0.10),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45 })
+);
+sliderBg.position.set(0, 0, -0.001);
+sliderPanel.add(sliderBg);
+
+// Track + knob
+ sliderTrack = new THREE.Mesh(
+  new THREE.PlaneGeometry(TRACK_LEN_M, 0.02),
+  new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.85 })
+);
+ sliderKnob = new THREE.Mesh(
+  new THREE.CircleGeometry(0.015, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffcc66 })
+);
+sliderKnob.position.z = 0.001;
+sliderPanel.add(sliderTrack);
+sliderPanel.add(sliderKnob);
+
+// Label (canvas text)
+const voltageCanvas = document.createElement('canvas');
+voltageCanvas.width = 1024; voltageCanvas.height = 256;
+const voltageCtx = voltageCanvas.getContext('2d');
+const voltageTexture = new THREE.CanvasTexture(voltageCanvas);
+voltageTexture.colorSpace = THREE.SRGBColorSpace;
+
+const voltageLabel = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.30, 0.09),
+  new THREE.MeshBasicMaterial({ map: voltageTexture, transparent: true, depthTest: false, depthWrite: false })
+);
+voltageLabel.position.set(0, 0.09, 0.006);
+sliderPanel.add(voltageLabel);
+
+
+// initial placement/orient
+sliderPanel.position.set(0.07, 0.02, -0.05);
+sliderPanel.rotation.set(
+  THREE.MathUtils.degToRad(45),  // tilt up
+  THREE.MathUtils.degToRad(25),  // yaw a bit toward user’s right
+  THREE.MathUtils.degToRad(-90)  // lay flat
+);
+
+// init knob + label
+sliderKnob.position.x = valueToX(sliderValue);
+drawVoltageLabel(sliderValue);
+
+// XR session hooks to find hands and ref space
+renderer.xr.addEventListener('sessionstart', async () => {
+  const session = renderer.xr.getSession();
+  try { xrRefSpace_local = await session.requestReferenceSpace('local-floor'); } catch {}
+  refreshHandSources(session);
+  session.addEventListener('inputsourceschange', () => refreshHandSources(session));
+});
+
+function refreshHandSources(session) {
+  leftHandSource = null; rightHandSource = null;
+  for (const src of session.inputSources) {
+    if (src.hand && src.handedness === 'left')  leftHandSource = src;
+    if (src.hand && src.handedness === 'right') rightHandSource = src;
+  }
 }
+
+function controllerSelectStart(e) {
+  // Begin drag if ray hits slider panel
+  const ctrl = e.target;
+  if (intersectSlider(ctrl)) {
+    isControllerDragging = true;
+    activeDraggingController = ctrl;
+  }
+}
+function controllerSelectEnd(e) {
+  if (activeDraggingController === e.target) {
+    isControllerDragging = false;
+    activeDraggingController = null;
+  }
+}
+
+controller1.addEventListener('selectstart', controllerSelectStart);
+controller1.addEventListener('selectend',   controllerSelectEnd);
+controller2.addEventListener('selectstart', controllerSelectStart);
+controller2.addEventListener('selectend',   controllerSelectEnd);
+
+
+
+}
+
+// SLIDER helpers
+
+// Pose the slider root at left wrist, or left controller grip if no hands
+function updateSliderPose(frame) {
+  const session = renderer.xr.getSession?.();
+  if (!session || !xrRefSpace_local) return;
+
+  // Hand wrist preferred
+  if (leftHandSource && leftHandSource.hand) {
+    const ht = leftHandSource.hand;
+    const wrist = ht.get?.('wrist') || (typeof XRHand!=='undefined' && ht[XRHand.WRIST]);
+    if (wrist) {
+      const pose = frame.getJointPose(wrist, xrRefSpace_local);
+      if (pose) {
+        const { position, orientation } = pose.transform;
+        sliderRoot.position.set(position.x, position.y, position.z);
+        sliderRoot.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+        sliderRoot.visible = true;
+        return;
+      }
+    }
+  }
+  // Fallback to left controller grip
+  const grip0 = renderer.xr.getControllerGrip?.(0);
+  if (grip0) {
+    grip0.matrixWorld.decompose(sliderRoot.position, sliderRoot.quaternion, sliderRoot.scale);
+    sliderRoot.visible = true;
+    return;
+  }
+  sliderRoot.visible = false;
+}
+
+// Right-hand pinch drag (if hands present)
+function updateSliderPinch(frame, sliderPanel, sliderKnob, drawVoltageLabel) {
+  if (!xrRefSpace_local) return;
+
+  const session = renderer.xr.getSession?.();
+  if (!session) return;
+
+  const rhs = (() => {
+    for (const src of session.inputSources) if (src.hand && src.handedness === 'right') return src;
+    return rightHandSource;
+  })();
+  if (!rhs || !rhs.hand) return;
+
+  const ht = rhs.hand;
+  const tipI = ht.get?.('index-finger-tip') || (typeof XRHand!=='undefined' && ht[XRHand.INDEX_PHALANX_TIP]);
+  const tipT = ht.get?.('thumb-tip')        || (typeof XRHand!=='undefined' && ht[XRHand.THUMB_PHALANX_TIP]);
+  const pI = tipI ? frame.getJointPose(tipI, xrRefSpace_local) : null;
+  const pT = tipT ? frame.getJointPose(tipT, xrRefSpace_local) : null;
+  if (!pI || !pT) return;
+
+  const dx = pI.transform.position.x - pT.transform.position.x;
+  const dy = pI.transform.position.y - pT.transform.position.y;
+  const dz = pI.transform.position.z - pT.transform.position.z;
+  const pinching = Math.hypot(dx, dy, dz) < PINCH_THRESHOLD;
+  if (!pinching) return;
+
+  const tipWorld = new THREE.Vector3(
+    pI.transform.position.x, pI.transform.position.y, pI.transform.position.z
+  );
+  const local = sliderPanel.worldToLocal(tipWorld.clone());
+  const clampedX = THREE.MathUtils.clamp(local.x, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+
+  sliderValue = xToValue(clampedX);
+  sliderKnob.position.x = THREE.MathUtils.lerp(sliderKnob.position.x, clampedX, 0.35);
+  drawVoltageLabel(sliderValue);
+}
+
+// Controller drag (if no hands)
+function updateSliderControllerDrag(sliderPanel, sliderKnob, drawVoltageLabel) {
+  if (!isControllerDragging || !activeDraggingController) return;
+  const hit = intersectSlider(activeDraggingController);
+  if (!hit) return;
+
+  // Convert hit point from world to panel local, clamp to track
+  const local = sliderPanel.worldToLocal(hit.point.clone());
+  const clampedX = THREE.MathUtils.clamp(local.x, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+
+  sliderValue = xToValue(clampedX);
+  sliderKnob.position.x = THREE.MathUtils.lerp(sliderKnob.position.x, clampedX, 0.5);
+  drawVoltageLabel(sliderValue);
+}
+//
+
+
 
 function update() {
     renderer.setAnimationLoop( function(timestamp, frame) {        
@@ -611,9 +856,33 @@ function update() {
             negative_battery_anim();
         }
 
+        
+
         //UPDATE SPHERE POSITION
         updateSpherePosition();
         checkBounds(holeSpheres, electronSpheres, boxMin, boxMax);
+
+        // --- XR slider updates ---
+        if (sliderBuilt) {
+
+             updateSliderPose(frame);
+
+        // Hand-tracking pinch (if available)
+        updateSliderPinch(frame, sliderPanel, sliderKnob, drawVoltageLabel);
+
+        // Controller ray drag (fallback)
+        updateSliderControllerDrag(sliderPanel, sliderKnob, drawVoltageLabel);
+
+        // Apply to your sim
+        voltage = sliderValue; // <-- drives the depletion width formula
+        document.getElementById("myText").innerHTML = voltage.toFixed(2);
+
+
+        }
+
+       
+
+
 		updateCamera();
         renderer.render( scene, camera );
 		
