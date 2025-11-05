@@ -363,6 +363,14 @@ createHUD();
         camera.rotation.y = MathUtils.degToRad(cameraControls.rotateY);
     });
 
+    const thermalControls = { scalar: SphereUtil.getScalar() };
+
+    gui.add(thermalControls, 'scalar', 0.05, 3.0, 0.01)
+    .name('Sphere Scalar')
+    .onChange((v) => {
+        SphereUtil.setScalar(v);
+    });
+
     const resetButton = { 'Reset Cube': resetGUI };
 
     // Add a button to reset GUI controls
@@ -1070,7 +1078,7 @@ function addAcceleration(type, innerBoxSize, time, scalar) {
 }
 
 function updateSpherePosition() {
-    const minVelocity = 0.9;
+    const minVelocity = 0.000001;
     const maxVelocity = 30;
     for (var sphere of [...electronSpheres, ...holeSpheres]) {
         const currVelocity = sphere.velocity.clone();
