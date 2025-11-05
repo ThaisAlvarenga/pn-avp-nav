@@ -290,7 +290,7 @@ function init() {
 
     const thermalControls = { scalar: SphereUtil.getScalar() };
 
-    gui.add(thermalControls, 'scalar', 0.05, 3.0, 0.01)
+    gui.add(thermalControls, 'scalar', 0.001, 1.0, 0.001)
     .name('Sphere Scalar')
     .onChange((v) => {
         SphereUtil.setScalar(v);
