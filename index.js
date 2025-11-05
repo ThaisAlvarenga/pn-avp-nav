@@ -570,23 +570,43 @@ scene.add(sliderRoot);
 sliderRoot.add(sliderTilt);
 sliderTilt.add(sliderPanel);
 
+
 // Backing panel
 const sliderBg = new THREE.Mesh(
   new THREE.PlaneGeometry(0.22, 0.10),
-  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45 })
+  new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0.45,
+    side: THREE.DoubleSide,      // <— face both ways
+    depthTest: false,            // <— draw on top
+    depthWrite: false
+  })
 );
-sliderBg.position.set(0, 0, -0.001);
-sliderPanel.add(sliderBg);
 
 // Track + knob
- sliderTrack = new THREE.Mesh(
+sliderTrack = new THREE.Mesh(
   new THREE.PlaneGeometry(TRACK_LEN_M, 0.02),
-  new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.85 })
+  new THREE.MeshBasicMaterial({
+    color: 0x222222,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,      // <—
+    depthTest: false,
+    depthWrite: false
+  })
 );
- sliderKnob = new THREE.Mesh(
+
+sliderKnob = new THREE.Mesh(
   new THREE.CircleGeometry(0.015, 32),
-  new THREE.MeshBasicMaterial({ color: 0xffcc66 })
+  new THREE.MeshBasicMaterial({
+    color: 0xffcc66,
+    side: THREE.DoubleSide,      // <—
+    depthTest: false,
+    depthWrite: false
+  })
 );
+
 sliderKnob.position.z = 0.001;
 sliderPanel.add(sliderTrack);
 sliderPanel.add(sliderKnob);
@@ -680,14 +700,17 @@ function updateSliderPose(frame) {
       }
     }
   }
-  // Fallback to left controller grip
+  // Fallback: any controller grip (0 or 1)
   const grip0 = renderer.xr.getControllerGrip?.(0);
-  if (grip0) {
-    grip0.matrixWorld.decompose(sliderRoot.position, sliderRoot.quaternion, sliderRoot.scale);
+  const grip1 = renderer.xr.getControllerGrip?.(1);
+  const grip = grip0 || grip1;
+
+  if (grip) {
+    grip.matrixWorld.decompose(sliderRoot.position, sliderRoot.quaternion, sliderRoot.scale);
     sliderRoot.visible = true;
     return;
   }
-  sliderRoot.visible = false;
+  //sliderRoot.visible = false;
 }
 
 // Right-hand pinch drag (if hands present)
