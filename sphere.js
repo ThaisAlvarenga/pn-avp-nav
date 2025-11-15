@@ -2,9 +2,22 @@ import * as THREE from 'https://unpkg.com/three@0.163.0/build/three.module.js';
 //SPHEREUTIL 
 
 //boltzmann distribution variables
-var scalar = 0.5;
-var minScalar = 0.22;
-var maxScalar = 0.88;
+
+// CHANGING ALL THIS FOR VELOCTIY TESTS
+var minScalar = 0.0001;
+var maxScalar = 3.0; 
+
+export let scalar = 0.5;           // was: var scalar = 0.5
+
+export function setScalar(v) {      
+  // clamp for safety; tweak bounds if you like
+  const clamped = Math.max(0.0001, Math.min(3.0, Number(v)));
+  scalar = clamped;
+}
+
+export function getScalar() {       // new
+  return scalar;
+}
 
 export function createSphere(i, minPos, maxPos, sphereColor, transparency, cubeSize) {
     var opacityVal = null;

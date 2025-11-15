@@ -16,32 +16,9 @@ import * as SphereUtil from "./sphere.js";
 
 const hdrFile = "./assets/black.hdr";
 
+// Detect Apple Vision Pro (visionOS)
+const IS_AVP = /\b(visionos|applevisionpro)\b/i.test(navigator.userAgent);
 
-// --- visionOS detection + gesture state ---
-const IS_AVP = /\b(visionos|apple ?vision ?pro)\b/i.test(navigator.userAgent);
-
-// Global refs used across patches
-let XR_ORBIT_PIVOT;                 // the group we rotate/translate
-const ORBIT_TARGET = new THREE.Vector3(0, 0, 0);
-
-let handL = null, handR = null;     // AVP hand objects
-
-// Simple gesture state & temps
-const G = {
-  left:  { pinching:false, last:new THREE.Vector3(), hasLast:false },
-  right: { pinching:false, last:new THREE.Vector3(), hasLast:false },
-  lastTwoDist: null
-};
-
-const PINCH_THRESH = 0.040; // 4cm forgiving pinch
-const ROTATE_SENS = 3.0;    // radians per meter of hand move
-const ZOOM_SENS   = 0.8;    // meters of pivot dolly per meter
-
-// temps
-const _tmpA = new THREE.Vector3();
-const _tmpB = new THREE.Vector3();
-const _delta = new THREE.Vector3();
-const _invCamQ = new THREE.Quaternion();
 
 
 //scene set up variables and window variables
@@ -118,7 +95,6 @@ var recombination_orbs = [];
 //generation variables
 var generatedPairs = []; //[{electron, hole}, {electron, hole}]
 
-
 //VR control variables
 var controller1, controller2;
 var controllerGrip1, controllerGrip2;
@@ -146,10 +122,72 @@ const vrSettings = {
 	rotationSpeed: 0.05
 };
 
+// XR slider in world-space variables
+// --- XR slider globals (TOP OF FILE) ---
+const SLIDER_MIN = -1.4;
+const SLIDER_MAX =  0.4;
+const TRACK_LEN_M = 0.18;
+const PINCH_THRESHOLD = 0.018;
+
+let sliderValue = 0.0;
+let xrRefSpace_local = null;
+let leftHandSource = null;
+let rightHandSource = null;
+
+const sliderRoot  = new THREE.Object3D();
+const sliderTilt  = new THREE.Object3D();
+const sliderPanel = new THREE.Object3D();
+
+let sliderKnob;         // <— promote to global
+let sliderTrack;        // <— promote to global
+let voltageCanvas, voltageCtx, voltageTexture; // <— promote
+let sliderBuilt = false; // guard so you don’t touch UI before it exists
+
+const sliderRaycaster = new THREE.Raycaster();
+const sliderTmpMat = new THREE.Matrix4();
+let isControllerDragging = false;
+let activeDraggingController = null;
+
+const valueToX = v => THREE.MathUtils.mapLinear(v, SLIDER_MIN, SLIDER_MAX, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+const xToValue = x => THREE.MathUtils.clamp(
+  THREE.MathUtils.mapLinear(x, -TRACK_LEN_M/2, TRACK_LEN_M/2, SLIDER_MIN, SLIDER_MAX),
+  SLIDER_MIN, SLIDER_MAX
+);
+
+// make drawVoltageLabel available everywhere
+function drawVoltageLabel(v) {
+  if (!voltageCanvas) return;
+  const W = voltageCanvas.width, H = voltageCanvas.height;
+  voltageCtx.clearRect(0,0,W,H);
+  voltageCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  voltageCtx.fillRect(0,0,W,H);
+  voltageCtx.fillStyle = '#fff';
+  voltageCtx.font = 'bold 120px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  voltageCtx.textAlign = 'center';
+  voltageCtx.textBaseline = 'middle';
+  voltageCtx.fillText(`Voltage: ${v.toFixed(2)} V`, W/2, H/2);
+  voltageTexture.needsUpdate = true;
+}
+
+// also make intersectSlider global because you call it outside where you created it
+function intersectSlider(ctrl) {
+  if (!sliderKnob || !sliderTrack) return null;
+  sliderTmpMat.identity().extractRotation(ctrl.matrixWorld);
+  sliderRaycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  sliderRaycaster.ray.direction.set(0,0,-1).applyMatrix4(sliderTmpMat);
+  const hits = sliderRaycaster.intersectObjects([sliderKnob, sliderTrack], false);
+  return hits.length ? hits[0] : null;
+}
+
+
+
+
+
 const loader = new FontLoader();
 var scene = new THREE.Scene();
 
 init();
+
 
 update();
 
@@ -177,7 +215,8 @@ setInterval(() => {
 }, 2000);
 
  
-function init() {
+function init() 
+{
     //camera, background textures, background, scene, initial geometry, materials, renderer
     const norm_vel = [{nv: 0.1, quantity: 3}, {nv: 0.2, quantity: 10}, {nv: 0.3, quantity: 21}, {nv: 0.4, quantity: 35}, {nv: 0.5, quantity: 49}, 
         {nv: 0.6, quantity: 63}, {nv: 0.7, quantity: 74}, {nv: 0.8, quantity: 82}, {nv: 0.9, quantity: 86}, {nv: 1.0, quantity: 86},
@@ -206,19 +245,7 @@ function init() {
     camera = new THREE.PerspectiveCamera( 75, container.clientWidth / container.clientHeight, 0.1, 1500);
     // camera.position.z = 150;
     camera.position.set(0, 0, 150);
-
-    // --- Visual debug panel attached to the camera (always visible) ---
-let DEBUG_PANEL;
-{
-  const geo = new THREE.PlaneGeometry(0.22, 0.08);
-  const mat = new THREE.MeshBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.85 });
-  DEBUG_PANEL = new THREE.Mesh(geo, mat);
-  DEBUG_PANEL.position.set(0, -0.18, -0.6); // a little below your view
-  DEBUG_PANEL.userData.keepInScene = true;  // keep out of pivot
-  camera.add(DEBUG_PANEL);                  // attach to camera (root scene)
-  scene.add(camera);                        // ensure camera is in the root
-}
-
+    
 
     //renderer
     renderer = new THREE.WebGLRenderer({ alpha: false });
@@ -227,46 +254,50 @@ let DEBUG_PANEL;
     renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
     // initXR();
-    container.appendChild(renderer.domElement);
-
+   container.appendChild(renderer.domElement);
     const xrBtn = XRButton.createButton(renderer, {
     sessionMode: IS_AVP ? 'immersive-ar' : 'immersive-vr',
     requiredFeatures: ['local-floor'],
-    optionalFeatures: ['hand-tracking','hit-test','anchors']
+    optionalFeatures: ['hand-tracking','anchors','hit-test','dom-overlay']
     });
     container.appendChild(xrBtn);
+	dolly = new THREE.Object3D();
+	setUpVRControls();
 
-    dolly = new THREE.Object3D();
-    setUpVRControls();
+    
 
     // after you create dolly and before setAnimationLoop
     renderer.xr.addEventListener('sessionstart', () => {
-  if (IS_AVP) {
-    // AVP: hands for gestures; keep them in root scene (not in pivot)
-    handL = renderer.xr.getHand(0); handL.userData.keepInScene = true;
-    handR = renderer.xr.getHand(1); handR.userData.keepInScene = true;
-    scene.add(handL, handR);
+       const session = renderer.xr.getSession();
 
-    // We will move XR_ORBIT_PIVOT (content), not the camera/dolly
-    // (optional) disable desktop OrbitControls inside XR
-    orbit.enabled = false;
+  // XR natural input / controller select events (AVP transient pointer, Quest triggers)
+//   if (session) {
+//     session.addEventListener('selectstart', onXRSelectStart);
+//     session.addEventListener('selectend',   onXRSelectEnd);
+//   }
 
-  } else {
-    // Quest path: camera rides the dolly
+  if (!IS_AVP) {
     dolly.add(camera);
     orbit.enabled = false;
+  } else {
+    orbit.enabled = true;
+    orbit.update();
   }
-});
+    });
 
-renderer.xr.addEventListener('sessionend', () => {
-  if (!IS_AVP) scene.add(camera);
-  // reset gesture state
-  G.left.hasLast = G.right.hasLast = false;
-  G.lastTwoDist = null;
+    renderer.xr.addEventListener('sessionend', () => {
+        const session = renderer.xr.getSession();
+//   if (session) {
+//     session.removeEventListener('selectstart', onXRSelectStart);
+//     session.removeEventListener('selectend',   onXRSelectEnd);
+//   }
+
+  if (!IS_AVP) {
+    scene.add(camera);
+  }
   orbit.enabled = true;
   orbit.update();
-});
-
+    });
 
 
 
@@ -287,31 +318,6 @@ renderer.xr.addEventListener('sessionend', () => {
     const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
     directionalLight.position.set(1, 1, 1).normalize();
     scene.add(directionalLight);
-
-    // ---- XR orbit pivot (we rotate/translate this in XR) ----
-XR_ORBIT_PIVOT = new THREE.Group();
-XR_ORBIT_PIVOT.name = 'XR_ORBIT_PIVOT';
-scene.add(XR_ORBIT_PIVOT);
-
-// Move everything currently in the scene (except camera) into the pivot:
-(function scoopIntoPivot() {
-  const survivors = new Set([camera]);
-  const children = scene.children.slice();
-  for (const c of children) {
-    if (!survivors.has(c)) XR_ORBIT_PIVOT.add(c);
-  }
-})();
-
-// Route all future scene.add() calls into the pivot automatically,
-// EXCEPT the camera and any object you mark with userData.keepInScene = true
-const _sceneAdd = scene.add.bind(scene);
-scene.add = function(...objs) {
-  for (const o of objs) {
-    if (o === camera || o?.userData?.keepInScene === true) _sceneAdd(o);
-    else XR_ORBIT_PIVOT.add(o);
-  }
-};
-
 
     // GUI
     gui = new dat.GUI({autoPlace: false});
@@ -344,6 +350,14 @@ scene.add = function(...objs) {
         camera.rotation.y = MathUtils.degToRad(cameraControls.rotateY);
     });
 
+    const thermalControls = { scalar: SphereUtil.getScalar() };
+
+    gui.add(thermalControls, 'scalar', 0.001, 1.0, 0.001)
+    .name('Sphere Scalar')
+    .onChange((v) => {
+        SphereUtil.setScalar(v);
+    });
+
     const resetButton = { 'Reset Cube': resetGUI };
 
     // Add a button to reset GUI controls
@@ -354,10 +368,15 @@ scene.add = function(...objs) {
 
 
     voltageControl.addEventListener('input', () => {
-        voltageLevel = parseFloat(voltageControl.value);
-        voltage = voltageLevel;
-        document.getElementById("myText").innerHTML = voltage;
-     });
+  voltage = parseFloat(voltageControl.value);
+  document.getElementById("myText").innerHTML = voltage.toFixed(2);
+
+  if (sliderBuilt) {
+    sliderValue = voltage;                   // reflect DOM change in XR slider
+    sliderKnob.position.x = valueToX(sliderValue);
+    drawVoltageLabel(sliderValue);
+  }
+});
 
  
     
@@ -398,6 +417,7 @@ scene.add = function(...objs) {
         scene.add(eSignTextMesh);
         scene.add(chargeTextMesh_pos);
         scene.add(chargeTextMesh_neg);
+
     
     } );
 
@@ -545,108 +565,207 @@ scene.add = function(...objs) {
             scatterTime: (scatterTimeMean + (perlin.noise(i * 100, i * 200, performance.now() * 0.001) - 0.5)*0.3)});
     }
 
-}
+    // === Build slider UI ===
+scene.add(sliderRoot);
+sliderRoot.add(sliderTilt);
+sliderTilt.add(sliderPanel);
 
-function pivotRotateAroundTarget(dYaw, dPitch) {
-  // keep pivot centered on your logical orbit target
-  XR_ORBIT_PIVOT.position.copy(ORBIT_TARGET);
 
-  // yaw around world up
-  XR_ORBIT_PIVOT.rotateOnWorldAxis(new THREE.Vector3(0,1,0), dYaw);
+// Backing panel
+const sliderBg = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.22, 0.10),
+  new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0.45,
+    side: THREE.DoubleSide,      // <— face both ways
+    depthTest: false,            // <— draw on top
+    depthWrite: false
+  })
+);
 
-  // pitch around camera-right so it feels natural
-  const camRight = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
-  XR_ORBIT_PIVOT.rotateOnWorldAxis(camRight, dPitch);
-}
+// Track + knob
+sliderTrack = new THREE.Mesh(
+  new THREE.PlaneGeometry(TRACK_LEN_M, 0.02),
+  new THREE.MeshBasicMaterial({
+    color: 0x222222,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,      // <—
+    depthTest: false,
+    depthWrite: false
+  })
+);
 
-function pivotDollyAlongView(deltaMeters) {
-  // move content toward/away from the headset
-  const viewDir = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
-  XR_ORBIT_PIVOT.position.addScaledVector(viewDir, deltaMeters);
-}
+sliderKnob = new THREE.Mesh(
+  new THREE.CircleGeometry(0.015, 32),
+  new THREE.MeshBasicMaterial({
+    color: 0xffcc66,
+    side: THREE.DoubleSide,      // <—
+    depthTest: false,
+    depthWrite: false
+  })
+);
 
-function getJointPos(hand, name, out = new THREE.Vector3()) {
-  if (!hand || !hand.joints) return null;
-  const j = hand.joints[name];
-  if (!j) return null;
-  return out.copy(j.position);
-}
+sliderKnob.position.z = 0.001;
+sliderPanel.add(sliderTrack);
+sliderPanel.add(sliderKnob);
 
-function isPinching(hand, threshold = PINCH_THRESH) {
-  if (!hand || !hand.joints) return false;
-  const a = hand.joints['index-finger-tip'];
-  const b = hand.joints['thumb-tip'];
-  if (!a || !b) return false;
-  return a.position.distanceTo(b.position) < threshold;
-}
+// Label (canvas text)
+const voltageCanvas = document.createElement('canvas');
+voltageCanvas.width = 1024; voltageCanvas.height = 256;
+const voltageCtx = voltageCanvas.getContext('2d');
+const voltageTexture = new THREE.CanvasTexture(voltageCanvas);
+voltageTexture.colorSpace = THREE.SRGBColorSpace;
 
-function handleAVPGestures() {
-  if (!IS_AVP || !renderer.xr.isPresenting) return;
+const voltageLabel = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.30, 0.09),
+  new THREE.MeshBasicMaterial({ map: voltageTexture, transparent: true, depthTest: false, depthWrite: false })
+);
+voltageLabel.position.set(0, 0.09, 0.006);
+sliderPanel.add(voltageLabel);
 
-  const leftPinch  = isPinching(handL);
-  const rightPinch = isPinching(handR);
 
-  // --- VISUAL DEBUG: color indicates pinch state ---
-// purple = two-hand pinch, green = left pinch, blue = right pinch, gray = none
-if (typeof DEBUG_PANEL !== 'undefined' && DEBUG_PANEL.material) {
-  if (leftPinch && rightPinch) {
-    DEBUG_PANEL.material.color.setHex(0x9b59b6); // purple
-  } else if (leftPinch) {
-    DEBUG_PANEL.material.color.setHex(0x2ecc71); // green
-  } else if (rightPinch) {
-    DEBUG_PANEL.material.color.setHex(0x3498db); // blue
-  } else {
-    DEBUG_PANEL.material.color.setHex(0x444444); // idle gray
+// initial placement/orient
+sliderPanel.position.set(0.07, 0.02, -0.05);
+sliderPanel.rotation.set(
+  THREE.MathUtils.degToRad(45),  // tilt up
+  THREE.MathUtils.degToRad(25),  // yaw a bit toward user’s right
+  THREE.MathUtils.degToRad(-90)  // lay flat
+);
+
+// init knob + label
+sliderKnob.position.x = valueToX(sliderValue);
+drawVoltageLabel(sliderValue);
+
+// XR session hooks to find hands and ref space
+renderer.xr.addEventListener('sessionstart', async () => {
+  const session = renderer.xr.getSession();
+  try { xrRefSpace_local = await session.requestReferenceSpace('local-floor'); } catch {}
+  refreshHandSources(session);
+  session.addEventListener('inputsourceschange', () => refreshHandSources(session));
+});
+
+function refreshHandSources(session) {
+  leftHandSource = null; rightHandSource = null;
+  for (const src of session.inputSources) {
+    if (src.hand && src.handedness === 'left')  leftHandSource = src;
+    if (src.hand && src.handedness === 'right') rightHandSource = src;
   }
 }
 
-  const leftTip  = getJointPos(handL,  'index-finger-tip', _tmpA);
-  const rightTip = getJointPos(handR, 'index-finger-tip', _tmpB);
+function controllerSelectStart(e) {
+  // Begin drag if ray hits slider panel
+  const ctrl = e.target;
+  if (intersectSlider(ctrl)) {
+    isControllerDragging = true;
+    activeDraggingController = ctrl;
+  }
+}
+function controllerSelectEnd(e) {
+  if (activeDraggingController === e.target) {
+    isControllerDragging = false;
+    activeDraggingController = null;
+  }
+}
 
-  // --- Two-hand pinch = zoom (distance change moves content) ---
-  if (leftPinch && rightPinch && leftTip && rightTip) {
-    const dist = leftTip.distanceTo(rightTip);
-    if (G.lastTwoDist != null) {
-      const d = dist - G.lastTwoDist; // apart => positive
-      const meters = THREE.MathUtils.clamp(d * ZOOM_SENS, -0.25, 0.25);
-      pivotDollyAlongView(meters);
+controller1.addEventListener('selectstart', controllerSelectStart);
+controller1.addEventListener('selectend',   controllerSelectEnd);
+controller2.addEventListener('selectstart', controllerSelectStart);
+controller2.addEventListener('selectend',   controllerSelectEnd);
+
+
+
+}
+
+// SLIDER helpers
+
+// Pose the slider root at left wrist, or left controller grip if no hands
+function updateSliderPose(frame) {
+  const session = renderer.xr.getSession?.();
+  if (!session || !xrRefSpace_local) return;
+
+  // Hand wrist preferred
+  if (leftHandSource && leftHandSource.hand) {
+    const ht = leftHandSource.hand;
+    const wrist = ht.get?.('wrist') || (typeof XRHand!=='undefined' && ht[XRHand.WRIST]);
+    if (wrist) {
+      const pose = frame.getJointPose(wrist, xrRefSpace_local);
+      if (pose) {
+        const { position, orientation } = pose.transform;
+        sliderRoot.position.set(position.x, position.y, position.z);
+        sliderRoot.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+        sliderRoot.visible = true;
+        return;
+      }
     }
-    G.lastTwoDist = dist;
-    G.left.hasLast = G.right.hasLast = false;
-    return; // do not also rotate this frame
-  } else {
-    G.lastTwoDist = null;
   }
+  // Fallback: any controller grip (0 or 1)
+  const grip0 = renderer.xr.getControllerGrip?.(0);
+  const grip1 = renderer.xr.getControllerGrip?.(1);
+  const grip = grip0 || grip1;
 
-  // --- One-hand pinch: rotate, or if forward/back dominates, dolly ---
-  let active = null;
-  if (rightPinch && rightTip) active = { tip:rightTip, state:G.right };
-  else if (leftPinch && leftTip) active = { tip:leftTip, state:G.left };
-
-  if (!active) { G.left.hasLast = G.right.hasLast = false; return; }
-
-  if (active.state.hasLast) {
-    _delta.copy(active.tip).sub(active.state.last);
-    // convert world delta to camera-local
-    _invCamQ.copy(camera.quaternion).invert();
-    _delta.applyQuaternion(_invCamQ);
-
-    const dx = THREE.MathUtils.clamp(_delta.x, -0.12, 0.12);
-    const dy = THREE.MathUtils.clamp(_delta.y, -0.12, 0.12);
-    const dz = THREE.MathUtils.clamp(_delta.z, -0.12, 0.12);
-
-    if (Math.abs(dz) > (Math.abs(dx) + Math.abs(dy)) * 1.2) {
-      // push/pull = dolly content (negative z is forward => zoom in)
-      pivotDollyAlongView(-dz * ZOOM_SENS);
-    } else {
-      // orbit rotate around target
-      pivotRotateAroundTarget(-dx * ROTATE_SENS, -dy * ROTATE_SENS);
-    }
+  if (grip) {
+    grip.matrixWorld.decompose(sliderRoot.position, sliderRoot.quaternion, sliderRoot.scale);
+    sliderRoot.visible = true;
+    return;
   }
-
-  active.state.last.copy(active.tip);
-  active.state.hasLast = true;
+  //sliderRoot.visible = false;
 }
+
+// Right-hand pinch drag (if hands present)
+function updateSliderPinch(frame, sliderPanel, sliderKnob, drawVoltageLabel) {
+  if (!xrRefSpace_local) return;
+
+  const session = renderer.xr.getSession?.();
+  if (!session) return;
+
+  const rhs = (() => {
+    for (const src of session.inputSources) if (src.hand && src.handedness === 'right') return src;
+    return rightHandSource;
+  })();
+  if (!rhs || !rhs.hand) return;
+
+  const ht = rhs.hand;
+  const tipI = ht.get?.('index-finger-tip') || (typeof XRHand!=='undefined' && ht[XRHand.INDEX_PHALANX_TIP]);
+  const tipT = ht.get?.('thumb-tip')        || (typeof XRHand!=='undefined' && ht[XRHand.THUMB_PHALANX_TIP]);
+  const pI = tipI ? frame.getJointPose(tipI, xrRefSpace_local) : null;
+  const pT = tipT ? frame.getJointPose(tipT, xrRefSpace_local) : null;
+  if (!pI || !pT) return;
+
+  const dx = pI.transform.position.x - pT.transform.position.x;
+  const dy = pI.transform.position.y - pT.transform.position.y;
+  const dz = pI.transform.position.z - pT.transform.position.z;
+  const pinching = Math.hypot(dx, dy, dz) < PINCH_THRESHOLD;
+  if (!pinching) return;
+
+  const tipWorld = new THREE.Vector3(
+    pI.transform.position.x, pI.transform.position.y, pI.transform.position.z
+  );
+  const local = sliderPanel.worldToLocal(tipWorld.clone());
+  const clampedX = THREE.MathUtils.clamp(local.x, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+
+  sliderValue = xToValue(clampedX);
+  sliderKnob.position.x = THREE.MathUtils.lerp(sliderKnob.position.x, clampedX, 0.35);
+  drawVoltageLabel(sliderValue);
+}
+
+// Controller drag (if no hands)
+function updateSliderControllerDrag(sliderPanel, sliderKnob, drawVoltageLabel) {
+  if (!isControllerDragging || !activeDraggingController) return;
+  const hit = intersectSlider(activeDraggingController);
+  if (!hit) return;
+
+  // Convert hit point from world to panel local, clamp to track
+  const local = sliderPanel.worldToLocal(hit.point.clone());
+  const clampedX = THREE.MathUtils.clamp(local.x, -TRACK_LEN_M/2, TRACK_LEN_M/2);
+
+  sliderValue = xToValue(clampedX);
+  sliderKnob.position.x = THREE.MathUtils.lerp(sliderKnob.position.x, clampedX, 0.5);
+  drawVoltageLabel(sliderValue);
+}
+//
+
 
 
 function update() {
@@ -760,17 +879,35 @@ function update() {
             negative_battery_anim();
         }
 
+        
+
         //UPDATE SPHERE POSITION
         updateSpherePosition();
         checkBounds(holeSpheres, electronSpheres, boxMin, boxMax);
+
+        // --- XR slider updates ---
+        if (sliderBuilt) {
+
+             updateSliderPose(frame);
+
+        // Hand-tracking pinch (if available)
+        updateSliderPinch(frame, sliderPanel, sliderKnob, drawVoltageLabel);
+
+        // Controller ray drag (fallback)
+        updateSliderControllerDrag(sliderPanel, sliderKnob, drawVoltageLabel);
+
+        // Apply to your sim
+        voltage = sliderValue; // <-- drives the depletion width formula
+        document.getElementById("myText").innerHTML = voltage.toFixed(2);
+
+
+        }
+
+       
+
+
 		updateCamera();
-
-if (IS_AVP) {
-  handleAVPGestures();    // <- process AVP gestures before drawing
-}
-
-renderer.render(scene, camera);
-
+        renderer.render( scene, camera );
 		
     });
 }
@@ -856,8 +993,15 @@ function setUpVRControls() {
 // }
 
 function updateCamera() {
-     if (!renderer.xr.isPresenting) return;
-     if (IS_AVP) return; 
+    if (!renderer.xr.isPresenting) return;
+
+    // AVP: keep orbit; no thumbstick locomotion/snap turns
+    if (IS_AVP) {
+        // Let OrbitControls run; ensure it keeps smoothing each frame
+        orbit.update();
+        return;
+    }
+
     const leftThumbstick = controllerStates.leftController.thumbstick;
     const rightThumbstick = controllerStates.rightController.thumbstick;
 
@@ -1144,7 +1288,7 @@ function addAcceleration(type, innerBoxSize, time, scalar) {
 }
 
 function updateSpherePosition() {
-    const minVelocity = 0.9;
+    const minVelocity = 0.000001;
     const maxVelocity = 30;
     for (var sphere of [...electronSpheres, ...holeSpheres]) {
         const currVelocity = sphere.velocity.clone();
