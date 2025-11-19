@@ -34,7 +34,12 @@ var cube1;
 var holeColor = 0xd55e00
 var electronColor = 0x56b4e9;
 
+let initialCameraPosition   = new THREE.Vector3();
+let initialCameraQuaternion = new THREE.Quaternion();
+let initialOrbitTarget      = new THREE.Vector3();
 
+let initialDollyPosition    = new THREE.Vector3();
+let initialDollyQuaternion  = new THREE.Quaternion();
 
 //PN Junction Initial Variables
 var electronSpheres = [];
@@ -350,13 +355,13 @@ function init()
         camera.rotation.y = MathUtils.degToRad(cameraControls.rotateY);
     });
 
-    const thermalControls = { scalar: SphereUtil.getScalar() };
+    // const thermalControls = { scalar: SphereUtil.getScalar() };
 
-    gui.add(thermalControls, 'scalar', 0.001, 1.0, 0.001)
-    .name('Sphere Scalar')
-    .onChange((v) => {
-        SphereUtil.setScalar(v);
-    });
+    // gui.add(thermalControls, 'scalar', 0.001, 1.0, 0.001)
+    // .name('Sphere Scalar')
+    // .onChange((v) => {
+    //     SphereUtil.setScalar(v);
+    // });
 
     const resetButton = { 'Reset Cube': resetGUI };
 
@@ -944,6 +949,9 @@ function setUpVRControls() {
     dolly.position.set(0, 0, 0);
     dolly.add(camera);
     scene.add(dolly);
+    // Save initial dolly transform for reset
+    initialDollyPosition.copy(dolly.position);
+    initialDollyQuaternion.copy(dolly.quaternion);
 
     //controllers
     controller1 = renderer.xr.getController(0);
@@ -1384,6 +1392,22 @@ function checkBounds(sphere1, sphere2, min, max) {
 // Function to reset GUI controls
 function resetGUI() {
     gui.__controllers.forEach(controller => controller.setValue(controller.initialValue));
+
+    // Reset camera + orbit to how they were when the scene first loaded
+    if (initialCameraPosition && initialCameraQuaternion && initialOrbitTarget) {
+        camera.position.copy(initialCameraPosition);
+        camera.quaternion.copy(initialCameraQuaternion);
+        camera.updateProjectionMatrix();
+
+        orbit.target.copy(initialOrbitTarget);
+        orbit.update();
+    }
+
+    // Reset dolly (for XR locomotion) if it exists
+    if (dolly && initialDollyPosition && initialDollyQuaternion) {
+        dolly.position.copy(initialDollyPosition);
+        dolly.quaternion.copy(initialDollyQuaternion);
+    }
 }
 
 
@@ -1496,6 +1520,11 @@ orbit.dampingFactor = 0.08;
 orbit.target.set(0, 0, 0);
 orbit.update();
 
-// Re-enable orbit after XR ends, disable on start (optional, but tidy)
-// renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
-// renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  orbit.update(); });
+// Save initial camera/orbit state so Reset can go back to this
+initialCameraPosition.copy(camera.position);
+initialCameraQuaternion.copy(camera.quaternion);
+initialOrbitTarget.copy(orbit.target);
+
+// Re-enable orbit after XR ends, disable on start
+renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
+renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  orbit.update(); });
